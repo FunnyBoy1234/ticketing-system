@@ -127,7 +127,7 @@ async def _reserve_once(
     conn: asyncpg.Connection, show: ShowMeta, user_id: str, seats: list[str], key: str, req_hash: str
 ) -> Outcome:
     # 1) Retry of a request we already decided? Cheap read, no locks. Most retries end here.
-    existing = await _load_key(conn, user_id, key)
+    existing = await _load_key(conn, show.id, user_id, key)
     if existing is not None:
         return _replay(existing, req_hash)
 
@@ -156,13 +156,13 @@ async def _reserve_once(
             """
             INSERT INTO idempotency_keys (user_id, key, request_hash, show_id)
             VALUES ($1, $2, $3, $4)
-            ON CONFLICT (user_id, key) DO NOTHING
+            ON CONFLICT (user_id, show_id, key) DO NOTHING
             RETURNING true
             """,
             user_id, key, req_hash, show.id,
         )
         if not claimed:
-            existing = await _load_key(conn, user_id, key)
+            existing = await _load_key(conn, show.id, user_id, key)
             return _replay(existing, req_hash)
 
         try:
@@ -176,10 +176,11 @@ async def _reserve_once(
         await conn.execute(
             """
             UPDATE idempotency_keys
-               SET status_code = $3, response = $4::jsonb, reservation_id = $5
-             WHERE user_id = $1 AND key = $2
+               SET status_code = $4, response = $5::jsonb, reservation_id = $6
+             WHERE user_id = $1 AND show_id = $2 AND key = $3
             """,
-            user_id, key, status, json.dumps(body), uuid.UUID(body["reservation_id"]) if status == 201 else None,
+            user_id, show.id, key, status, json.dumps(body),
+            uuid.UUID(body["reservation_id"]) if status == 201 else None,
         )
     return Outcome(status=status, body=body, reason=reason)
 
@@ -247,10 +248,11 @@ async def _take_seats(conn: asyncpg.Connection, show: ShowMeta, user_id: str, se
     }
 
 
-async def _load_key(conn: asyncpg.Connection, user_id: str, key: str) -> asyncpg.Record | None:
+async def _load_key(conn: asyncpg.Connection, show_id: uuid.UUID, user_id: str, key: str) -> asyncpg.Record | None:
     return await conn.fetchrow(
-        "SELECT request_hash, status_code, response FROM idempotency_keys WHERE user_id = $1 AND key = $2",
-        user_id, key,
+        "SELECT request_hash, status_code, response FROM idempotency_keys "
+        "WHERE user_id = $1 AND show_id = $2 AND key = $3",
+        user_id, show_id, key,
     )
 
 
@@ -269,14 +271,14 @@ async def _record_decline(
         """
         INSERT INTO idempotency_keys (user_id, key, request_hash, show_id, status_code, response)
         VALUES ($1, $2, $3, $4, 409, $5::jsonb)
-        ON CONFLICT (user_id, key) DO NOTHING
+        ON CONFLICT (user_id, show_id, key) DO NOTHING
         RETURNING true
         """,
         user_id, key, req_hash, show.id, json.dumps(body),
     )
     if inserted:
         return Outcome(status=409, body=body, reason=reason)
-    return _replay(await _load_key(conn, user_id, key), req_hash)
+    return _replay(await _load_key(conn, show.id, user_id, key), req_hash)
 
 
 def _replay(existing: asyncpg.Record, req_hash: str) -> Outcome:

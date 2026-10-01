@@ -11,7 +11,7 @@ its 201. Everything below exists to make that impossible.
 
 Inside one Postgres transaction (READ COMMITTED), per reserve:
 
-1. **Claim the idempotency key** – `INSERT … ON CONFLICT (user_id, key) DO NOTHING`.
+1. **Claim the idempotency key** – `INSERT … ON CONFLICT (user_id, show_id, key) DO NOTHING`.
 2. **Per-user quota** – one conditional upsert that checks and increments in a single statement:
    ```sql
    INSERT INTO user_show_quota … SELECT $show, $user, $n WHERE $n <= $limit
@@ -58,9 +58,10 @@ path; nearly all the rest see `confirmed` and leave without touching a lock.
 
 ## 2. Idempotency
 
-* **Where:** table `idempotency_keys`, primary key `(user_id, key)`, holding a SHA-256 of
-  the canonical request (`show_id` + sorted seats), the status code and the response body.
-  Keys are scoped per user, so two users cannot collide.
+* **Where:** table `idempotency_keys`, primary key `(user_id, show_id, key)`, holding a
+  SHA-256 of the canonical request (sorted seats), the status code and the response body.
+  Keys are scoped per user and show: two users cannot collide, and a client that reuses
+  simple keys like `k1` on a new show is not mistaken for a retry.
 * **Exactly once:** the first request to insert `(user, key)` owns the decision. Its
   effects (seats, quota, reservation) and the stored response commit in the same
   transaction, so a key never exists without its outcome, and an outcome never exists
@@ -146,7 +147,7 @@ Decisions proposed by the AI in that first version, for me to review and own:
 - Python/FastAPI/asyncpg + Postgres (matches my production background), raw SQL so the locking is visible
 - Locked read in label order + guarded update, rather than a bare conditional update
 - The hot-seat fast decline path
-- Storing declines under the idempotency key; per-user key scope
+- Storing declines under the idempotency key; (user, show) key scope
 - 200 (not 201) for a replayed success
 - Explicit cancel instead of TTL holds; `seat_taken` reported before `per_user_limit`
 - Admin-minted JWTs as the identity stand-in; public `/logs` ring buffer

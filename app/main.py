@@ -24,6 +24,7 @@ from .observability import (
     RequestContextMiddleware,
     current_request_id,
     log_buffer,
+    request_context,
     seat_collector,
     setup_logging,
 )
@@ -67,7 +68,7 @@ def _json(status: int, body: dict[str, Any], headers: dict[str, str] | None = No
 
 @app.exception_handler(ApiError)
 async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
-    request_context_outcome(exc.code)
+    request_context()["outcome"] = exc.code
     return _json(exc.status, {**exc.body(), "request_id": current_request_id()})
 
 
@@ -88,12 +89,6 @@ async def _db_unavailable(_: Request, exc: Exception) -> JSONResponse:
 for _exc in (DatabaseUnavailable, asyncpg.PostgresConnectionError, asyncpg.TooManyConnectionsError,
              ConnectionError, TimeoutError, asyncpg.InterfaceError):
     app.add_exception_handler(_exc, _db_unavailable)
-
-
-def request_context_outcome(outcome: str) -> None:
-    from .observability import request_context
-
-    request_context()["outcome"] = outcome
 
 
 # --------------------------------------------------------------------------------------

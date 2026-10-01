@@ -53,10 +53,12 @@ CREATE TABLE IF NOT EXISTS user_show_quota (
     PRIMARY KEY (show_id, user_id)
 );
 
--- Idempotency: one row per (user, key). The first request to insert the row owns
--- the decision; every later request with the same key replays the stored response
--- (or gets 409 if its body hashes differently). status_code is NULL only inside the
--- transaction that claimed the key - it is filled in before that transaction commits.
+-- Idempotency: one row per (user, show, key). Keys are scoped to the caller and the
+-- show they target, so a client that reuses simple keys on a new show starts clean.
+-- The first request to insert the row owns the decision; every later request with the
+-- same key replays the stored response (or gets 409 if its body hashes differently).
+-- status_code is NULL only inside the transaction that claimed the key - it is filled
+-- in before that transaction commits.
 CREATE TABLE IF NOT EXISTS idempotency_keys (
     user_id         text        NOT NULL,
     key             text        NOT NULL,
@@ -66,5 +68,5 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
     response        jsonb,
     reservation_id  uuid,
     created_at      timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (user_id, key)
+    PRIMARY KEY (user_id, show_id, key)
 );

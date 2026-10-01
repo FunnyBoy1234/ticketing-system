@@ -79,7 +79,7 @@ curl -X POST $BASE/auth/token -H "X-Admin-Key: $ADMIN_KEY" -H 'Content-Type: app
 | **200** + `Idempotent-Replayed: true` | replay of the original 201 | Same key, same body, after it already succeeded. Same `reservation_id`; nothing new is created. |
 | **409** | `seat_taken` | At least one requested seat is held/confirmed by someone else. **All-or-nothing:** nothing was reserved. Lists the taken seats. |
 | **409** | `per_user_limit` | This would take you over `per_user_limit` seats for the show. |
-| **409** | `idempotency_key_reused` | The key was already used with a different body (different seats or show). |
+| **409** | `idempotency_key_reused` | The key was already used on this show with different seats. |
 | **409** + `Idempotent-Replayed: true` | replay of an earlier decline | Same key, same body, after it was declined. Use a new key for a new attempt. |
 | 400 | `idempotency_key_required`, `invalid_json`, … | Malformed request. |
 | 401 / 403 | `unauthorized` / `not_reservation_owner` | Missing/invalid token; cancelling someone else's reservation. |
@@ -88,8 +88,8 @@ curl -X POST $BASE/auth/token -H "X-Admin-Key: $ADMIN_KEY" -H 'Content-Type: app
 Behaviour decisions, stated once:
 
 * **Multi-seat requests are all-or-nothing.** `["A12","A13"]` with A12 taken → 409, A13 untouched.
-* **Idempotency keys are scoped per user** and bind to the first request body that used
-  them, whatever its outcome. Seat order does not matter (`["A13","A12"]` == `["A12","A13"]`).
+* **Idempotency keys are scoped per user and show** and bind to the first request body that
+  used them, whatever its outcome. Seat order does not matter (`["A13","A12"]` == `["A12","A13"]`).
 * **Release model: explicit cancel.** Reserve confirms immediately (the brief's response
   is `status: "confirmed"`), and only the owner can cancel. Cancelling twice is a no-op 200.
   `held` exists in the schema and the counts but is always 0 in this build (see WRITEUP).
