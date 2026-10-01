@@ -1,0 +1,11 @@
+.git
+.venv
+.venv-burst
+__pycache__
+*.pyc
+.pytest_cache
+burst-report*.json
+tests
+scripts
+burst.sh
+*.md

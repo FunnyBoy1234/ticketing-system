@@ -1,0 +1,36 @@
+# Render Blueprint: New > Blueprint > pick this repo. Creates the API (Docker) and Postgres.
+#
+# Free plans work but are slow and sleep after 15 idle minutes (~1 min cold start).
+# For the review window consider plan: 0.5c-512mb for the web service so a 20k burst
+# finishes quickly and nothing sleeps. Free Postgres expires 30 days after creation.
+services:
+  - type: web
+    name: seat-reservation
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: singapore
+    # Deploys go live only once the app can reach Postgres.
+    healthCheckPath: /readyz
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: seat-reservation-db
+          property: connectionString
+      - key: ADMIN_KEY
+        generateValue: true
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DB_POOL_MAX
+        value: "20"
+      - key: LOGS_ENDPOINT_PUBLIC
+        value: "true"
+
+databases:
+  - name: seat-reservation-db
+    plan: free
+    region: singapore
+    databaseName: seats
+    user: seats
+    postgresMajorVersion: "16"

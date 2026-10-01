@@ -1,0 +1,52 @@
+# Local stack that runs the same image we deploy.
+#
+#   docker compose up --build -d                       # Postgres + API on http://localhost:8000
+#   ./burst.sh http://localhost:8000                    # stampede from the host
+#   docker compose --profile burst run --rm burst       # ...or from a container
+#   docker compose stop db                              # watch /readyz fail closed, then `start db`
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: seats
+    command: ["postgres", "-c", "max_connections=200"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d seats"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/seats
+      ADMIN_KEY: ${ADMIN_KEY:-dev-admin-key}
+      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me}
+      DB_POOL_MAX: ${DB_POOL_MAX:-20}
+      PORT: 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  burst:
+    profiles: ["burst"]
+    image: python:3.12-slim
+    working_dir: /work
+    volumes:
+      - ./scripts:/work/scripts:ro
+    environment:
+      ADMIN_KEY: ${ADMIN_KEY:-dev-admin-key}
+    command: ["sh", "-c", "pip install -q 'aiohttp>=3.9' && python scripts/burst.py http://app:8000 --report /tmp/burst-report.json"]
+    depends_on:
+      - app
+
+volumes:
+  pgdata:
