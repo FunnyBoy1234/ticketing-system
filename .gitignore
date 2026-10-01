@@ -1,0 +1,7 @@
+.venv/
+.venv-burst/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+burst-report*.json
