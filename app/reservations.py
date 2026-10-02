@@ -15,9 +15,14 @@ any wait, so the status we check is the status we hold the lock on - nobody can 
 it until we commit. The guarded UPDATE re-asserts it (belt and braces) and we require
 it to touch every requested seat, otherwise the whole attempt rolls back.
 
-Lock order for every write path: idempotency key -> user quota row -> seat rows (by label).
-Cancel takes its reservation row first (reserve never locks existing reservations), then
-quota, then seats by label - the same global order, so reserve and cancel cannot deadlock.
+Lock order for every write path: seat rows (by label) -> user quota row. Reserve claims its
+idempotency key first and cancel locks its reservation row first; neither ever locks the
+other's kind of row, so those come before the shared order without creating a cycle.
+Because every path takes seats-then-quota, reserve and cancel cannot deadlock.
+
+Seats are locked before the quota row so that a request which is both over the limit and
+asking for a taken seat is always declined as seat_taken - the same answer the fast path
+gives - no matter which path it takes.
 
 Multi-seat requests are ALL-OR-NOTHING: either every requested seat is confirmed in one
 reservation or nothing changes.
@@ -131,14 +136,11 @@ async def _reserve_once(
     if existing is not None:
         return _replay(existing, req_hash)
 
-    # 2) Over the limit in a single request: decline without touching any locks.
-    if len(seats) > show.per_user_limit:
-        return await _record_decline(conn, show, user_id, key, req_hash, "per_user_limit", _limit_body(show, len(seats)))
-
-    # 3) Fast decline for hot seats: a plain read of committed state. If any seat is already
+    # 2) Fast decline for hot seats: a plain read of committed state. If any seat is already
     #    taken we decline right away instead of queueing on its row lock. This is safe because
     #    it can only produce a *decline*, and the seat really was taken at the moment we read
     #    it. A *confirm* never comes from this read - it has to win the locked path below.
+    #    It runs before the limit check so seat_taken always wins over per_user_limit.
     taken = await conn.fetch(
         "SELECT label FROM seats WHERE show_id = $1 AND label = ANY($2::text[]) AND status <> 'available' ORDER BY label",
         show.id, seats,
@@ -147,6 +149,10 @@ async def _reserve_once(
         return await _record_decline(
             conn, show, user_id, key, req_hash, "seat_taken", _seat_taken_body(show.id, [r["label"] for r in taken])
         )
+
+    # 3) Over the limit in a single request: decline without touching any locks.
+    if len(seats) > show.per_user_limit:
+        return await _record_decline(conn, show, user_id, key, req_hash, "per_user_limit", _limit_body(show, len(seats)))
 
     # 4) Authoritative path: one transaction.
     async with conn.transaction():
@@ -188,6 +194,19 @@ async def _reserve_once(
 async def _take_seats(conn: asyncpg.Connection, show: ShowMeta, user_id: str, seats: list[str]) -> dict[str, Any]:
     n = len(seats)
 
+    # Lock the requested seats in a deterministic order (by label) - no deadlocks. Seats come
+    # before the quota row, so a request that is over the limit AND wants a taken seat is
+    # declined as seat_taken here, matching the fast path.
+    locked = await conn.fetch(
+        "SELECT label, status FROM seats WHERE show_id = $1 AND label = ANY($2::text[]) ORDER BY label FOR UPDATE",
+        show.id, seats,
+    )
+    taken = [r["label"] for r in locked if r["status"] != "available"]
+    if taken:
+        raise _Decline("seat_taken", _seat_taken_body(show.id, taken))
+    if len(locked) != n:  # validated against the show's seat list already; defensive only
+        raise RuntimeError(f"seat rows missing for show {show.id}: wanted {n}, found {len(locked)}")
+
     # Per-user limit: check-and-increment in ONE statement. The row lock it takes also
     # serialises this user's concurrent requests for this show, so 10 parallel requests
     # on a limit of 4 cannot all see "0 held" and all succeed.
@@ -204,17 +223,6 @@ async def _take_seats(conn: asyncpg.Connection, show: ShowMeta, user_id: str, se
     )
     if held_after is None:
         raise _Decline("per_user_limit", _limit_body(show, n))
-
-    # Lock the requested seats in a deterministic order (by label) - no deadlocks.
-    locked = await conn.fetch(
-        "SELECT label, status FROM seats WHERE show_id = $1 AND label = ANY($2::text[]) ORDER BY label FOR UPDATE",
-        show.id, seats,
-    )
-    taken = [r["label"] for r in locked if r["status"] != "available"]
-    if taken:
-        raise _Decline("seat_taken", _seat_taken_body(show.id, taken))
-    if len(locked) != n:  # validated against the show's seat list already; defensive only
-        raise RuntimeError(f"seat rows missing for show {show.id}: wanted {n}, found {len(locked)}")
 
     reservation_id = uuid.uuid4()
     result = await conn.execute(
@@ -249,9 +257,15 @@ async def _take_seats(conn: asyncpg.Connection, show: ShowMeta, user_id: str, se
 
 
 async def _load_key(conn: asyncpg.Connection, show_id: uuid.UUID, user_id: str, key: str) -> asyncpg.Record | None:
+    # The join brings the reservation's *current* status, so a replay after a cancel can say so.
     return await conn.fetchrow(
-        "SELECT request_hash, status_code, response FROM idempotency_keys "
-        "WHERE user_id = $1 AND show_id = $2 AND key = $3",
+        """
+        SELECT k.request_hash, k.status_code, k.response,
+               r.status AS current_status, r.cancelled_at
+          FROM idempotency_keys k
+          LEFT JOIN reservations r ON r.id = k.reservation_id
+         WHERE k.user_id = $1 AND k.show_id = $2 AND k.key = $3
+        """,
         user_id, show_id, key,
     )
 
@@ -295,6 +309,14 @@ def _replay(existing: asyncpg.Record, req_hash: str) -> Outcome:
     # A replayed success returns 200, not 201: nothing new was created. This keeps
     # "exactly one 201 per seat" true even when the winner retries.
     status = 200 if existing["status_code"] == 201 else existing["status_code"]
+    # Same reservation, current status: if it was cancelled since, the replay says so rather
+    # than echoing a stale "confirmed". A retry never re-books a cancelled reservation.
+    if existing["status_code"] == 201 and existing["current_status"] == "cancelled":
+        original = {
+            **original,
+            "status": "cancelled",
+            "cancelled_at": existing["cancelled_at"].isoformat() if existing["cancelled_at"] else None,
+        }
     return Outcome(
         status=status,
         body=original,
@@ -354,14 +376,14 @@ async def cancel(db: Database, reservation_id: uuid.UUID, user_id: str) -> Cance
                         # Cancelling twice is a no-op, not an error.
                         return CancelResult(200, {**_reservation_view(res), "already_cancelled": True})
 
-                    # Same global lock order as reserve: quota row, then seats by label.
-                    await conn.execute(
-                        "SELECT 1 FROM user_show_quota WHERE show_id = $1 AND user_id = $2 FOR UPDATE",
-                        res["show_id"], user_id,
-                    )
+                    # Same global lock order as reserve: seats by label, then the quota row.
                     await conn.execute(
                         "SELECT 1 FROM seats WHERE show_id = $1 AND reservation_id = $2 ORDER BY label FOR UPDATE",
                         res["show_id"], reservation_id,
+                    )
+                    await conn.execute(
+                        "SELECT 1 FROM user_show_quota WHERE show_id = $1 AND user_id = $2 FOR UPDATE",
+                        res["show_id"], user_id,
                     )
                     # Release ONLY seats that still point at this reservation. A seat that
                     # has since been sold to someone else carries their reservation_id and
