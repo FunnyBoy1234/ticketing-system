@@ -76,7 +76,7 @@ curl -X POST $BASE/auth/token -H "X-Admin-Key: $ADMIN_KEY" -H 'Content-Type: app
 | Status | `error` / meaning | When |
 |---|---|---|
 | **201** | confirmed | You got every seat you asked for. |
-| **200** + `Idempotent-Replayed: true` | replay of the original 201 | Same key, same body, after it already succeeded. Same `reservation_id`; nothing new is created. |
+| **200** + `Idempotent-Replayed: true` | replay of the original 201 | Same key, same body, after it already succeeded. Same `reservation_id`; nothing new is created. If the reservation was cancelled since, `status` is `"cancelled"` (with `cancelled_at`) – a retry never re-books. |
 | **409** | `seat_taken` | At least one requested seat is held/confirmed by someone else. **All-or-nothing:** nothing was reserved. Lists the taken seats. |
 | **409** | `per_user_limit` | This would take you over `per_user_limit` seats for the show. |
 | **409** | `idempotency_key_reused` | The key was already used on this show with different seats. |
@@ -93,7 +93,8 @@ Behaviour decisions, stated once:
 * **Release model: explicit cancel.** Reserve confirms immediately (the brief's response
   is `status: "confirmed"`), and only the owner can cancel. Cancelling twice is a no-op 200.
   `held` exists in the schema and the counts but is always 0 in this build (see WRITEUP).
-* **Decline precedence:** `seat_taken` is reported before `per_user_limit` when both apply.
+* **Decline precedence:** `seat_taken` always wins over `per_user_limit` when both apply,
+  on both the fast path and the locked path (seats are checked before the limit in each).
 
 ---
 
@@ -121,6 +122,12 @@ reconciles `/metrics` against both the API state and the outcomes it observed.
 It prints the outcome distribution, latency percentiles, a metrics reconciliation table
 and PASS/FAIL per check, writes `burst-report.json`, and exits non-zero on any failure.
 Every scenario size is a flag: `./burst.sh <url> --help`.
+
+`scripts/check_edge_cases.py` covers two paths a burst can't hit on demand: it holds a seat
+lock from a separate database connection to force a request onto the locked path, then
+checks that `seat_taken` wins over `per_user_limit` there, and that replaying a key after
+its reservation was cancelled reports `status: "cancelled"` without re-booking. It needs
+`DATABASE_URL`, so run it against `docker compose`, not the deployment.
 
 Local run (2 vCPU box shared by Postgres, the API and the client):
 
@@ -207,5 +214,6 @@ app/
   observability.py JSON logs, request ids, Prometheus metrics, ASGI middleware
   auth.py          JWT (HS256) users, admin key
 scripts/burst.py   the stampede + checks
+scripts/check_edge_cases.py  forced-race checks for replay-after-cancel and seat_taken precedence (local, needs DB access)
 burst.sh           one-command wrapper
 ```

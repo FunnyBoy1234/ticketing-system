@@ -12,7 +12,11 @@ its 201. Everything below exists to make that impossible.
 Inside one Postgres transaction (READ COMMITTED), per reserve:
 
 1. **Claim the idempotency key** – `INSERT … ON CONFLICT (user_id, show_id, key) DO NOTHING`.
-2. **Per-user quota** – one conditional upsert that checks and increments in a single statement:
+2. **Lock the seats in a fixed order** – `SELECT label, status FROM seats WHERE … ORDER BY label FOR UPDATE`.
+   After any wait, FOR UPDATE returns the latest committed version, so the status I check
+   is the status I now hold a lock on; nobody can change it until I commit. Any seat not
+   `available` → decline `seat_taken`.
+3. **Per-user quota** – one conditional upsert that checks and increments in a single statement:
    ```sql
    INSERT INTO user_show_quota … SELECT $show, $user, $n WHERE $n <= $limit
    ON CONFLICT (show_id, user_id) DO UPDATE
@@ -22,10 +26,6 @@ Inside one Postgres transaction (READ COMMITTED), per reserve:
    ```
    The row lock it takes serialises one user's parallel requests for one show, so ten
    parallel requests on a limit of 4 cannot all read "0 held".
-3. **Lock the seats in a fixed order** – `SELECT label, status FROM seats WHERE … ORDER BY label FOR UPDATE`.
-   After any wait, FOR UPDATE returns the latest committed version, so the status I check
-   is the status I now hold a lock on; nobody can change it until I commit. Any seat not
-   `available` → decline.
 4. **Guarded write** – `UPDATE seats SET status='confirmed', reservation_id=$r … WHERE … AND status='available'`,
    and the update must touch exactly `n` rows or the transaction aborts. Under the locks
    this is redundant; it is there so that a future refactor that drops the lock fails
@@ -35,15 +35,22 @@ Inside one Postgres transaction (READ COMMITTED), per reserve:
 Steps 2–4 run inside a savepoint. A decline rolls back to it (undoing the quota increment
 and releasing the seat locks), stores the 409 under the key, and commits.
 
+**Decline precedence:** seats are checked before the limit everywhere – the fast path
+(below) reads seats before the single-request limit check, and the transaction locks seats
+before the quota row – so a request that is over the limit *and* wants a taken seat is
+always declined as `seat_taken`, whichever path it takes.
+
 **Why it is race-free:** the only path from `available` to `confirmed` is a write made
 while holding the row lock on that seat, after re-reading its current committed state
 under that lock. Two transactions cannot both hold it; the second one reads `confirmed`
 and declines.
 
-**Deadlocks:** every write path takes locks in one global order: idempotency key → quota
-row → seat rows sorted by label. Cancel takes its own reservation row first (reserve
-never locks existing reservations), then the quota row, then its seats by label. With a
-single global order no cycle can form. Deadlock and serialization errors are still caught
+**Deadlocks:** every write path takes the shared locks in one global order: seat rows
+sorted by label, then the user's quota row. Reserve claims its idempotency key first and
+cancel locks its reservation row first; reserve never locks reservation rows and cancel
+never locks key rows, so those first locks cannot be part of a cycle. Nothing is locked
+after the quota row except rows the transaction already holds. With a single global
+order no cycle can form. Deadlock and serialization errors are still caught
 and the whole transaction retried (it rolled back entirely, key claim included), and
 `reserve_transaction_retries_total` counts them; it stayed at 0 in every burst.
 
@@ -72,6 +79,10 @@ path; nearly all the rest see `confirmed` and leave without touching a lock.
   **200** with `Idempotent-Replayed: true` and the original body (same `reservation_id`),
   so "exactly one 201 per seat" stays true even when the winner retries. **TODO: confirm
   200 vs 201 is the call I want; it is a one-line change in `_replay()`.**
+* **Replay after a cancel:** the key lookup joins the reservation's current status. If it
+  was cancelled since, the replay is the same reservation with `status: "cancelled"` and
+  `cancelled_at`, not a stale `"confirmed"`. A retry never re-books; a new attempt needs a
+  new key.
 * **Declines are stored too.** A request declined with `seat_taken` replays that same
   409 on retry. The key represents one attempt; a new attempt needs a new key. This makes
   "same key, different body → 409" hold whether the first attempt won or lost.
