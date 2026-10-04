@@ -1,10 +1,14 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["aiohttp>=3.9", "asyncpg>=0.31"]
+# ///
 """Focused regression checks for replay-after-cancel and decline precedence.
 
 Needs direct database access (it holds a seat lock to force the locked path), so it runs
 against a local stack, not a deployment:
 
     docker compose up -d
-    DATABASE_URL=postgresql://postgres:postgres@localhost:5432/seats python scripts/check_edge_cases.py
+    DATABASE_URL=postgresql://postgres:postgres@localhost:5432/seats uv run scripts/check_edge_cases.py
 
 1. Replay after cancel shows status "cancelled" and does not re-book.
 2a. Fast path: over-limit request that also wants a taken seat -> seat_taken.

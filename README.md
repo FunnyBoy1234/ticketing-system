@@ -6,7 +6,7 @@ limit, no retried request charged twice. It is instrumented so you can watch it 
 live: health probes, Prometheus metrics that reconcile with the API, structured logs with
 request ids, and a one-command stampede that checks all of it.
 
-**Stack:** Python 3.12 · FastAPI · asyncpg · PostgreSQL 16 · Prometheus client · Docker
+**Stack:** Python 3.12 · FastAPI · asyncpg · PostgreSQL 16 · Prometheus client · uv · Docker
 
 **Live URL:** `<TODO: https://your-service.onrender.com>`  ·  **Write-up:** [WRITEUP.md](WRITEUP.md)
 
@@ -30,8 +30,17 @@ ADMIN_KEY=<admin-key> ./burst.sh https://<live-url>
 `burst.sh` uses `uv` if installed, otherwise creates a small venv with `aiohttp`. It can
 also run inside Docker: `docker compose --profile burst run --rm burst`.
 
-Without Docker: `pip install -r requirements.txt`, point `DATABASE_URL` at a Postgres,
-`uvicorn app.main:app`. The schema is applied automatically on startup.
+Without Docker, with [uv](https://docs.astral.sh/uv/) and a Postgres to point at:
+
+```bash
+uv sync                                   # .venv from uv.lock (fetches Python 3.12 if needed)
+DATABASE_URL=postgresql://user:pass@localhost:5432/seats uv run uvicorn app.main:app
+```
+
+Dependencies live in `pyproject.toml`; `uv.lock` pins every version, and the Docker build
+installs from it with `uv sync --locked`, so local, image and deploy run the same set.
+After changing dependencies: `uv add <pkg>` (or edit `pyproject.toml` and run `uv lock`).
+The schema is applied automatically on startup.
 
 ---
 
@@ -127,7 +136,8 @@ Every scenario size is a flag: `./burst.sh <url> --help`.
 lock from a separate database connection to force a request onto the locked path, then
 checks that `seat_taken` wins over `per_user_limit` there, and that replaying a key after
 its reservation was cancelled reports `status: "cancelled"` without re-booking. It needs
-`DATABASE_URL`, so run it against `docker compose`, not the deployment.
+`DATABASE_URL`, so run it against `docker compose`, not the deployment:
+`DATABASE_URL=postgresql://postgres:postgres@localhost:5432/seats uv run scripts/check_edge_cases.py`.
 
 Local run (2 vCPU box shared by Postgres, the API and the client):
 
@@ -216,4 +226,5 @@ app/
 scripts/burst.py   the stampede + checks
 scripts/check_edge_cases.py  forced-race checks for replay-after-cancel and seat_taken precedence (local, needs DB access)
 burst.sh           one-command wrapper
+pyproject.toml     dependencies (PEP 621); uv.lock pins exact versions; .python-version = 3.12
 ```

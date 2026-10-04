@@ -1,15 +1,24 @@
 FROM python:3.12-slim
 
+# uv, pinned to the version that generated uv.lock.
+COPY --from=ghcr.io/astral-sh/uv:0.12.23 /uv /uvx /bin/
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PROJECT_ENVIRONMENT=/srv/.venv \
     PORT=8000
+ENV PATH="/srv/.venv/bin:${PATH}"
 
 WORKDIR /srv
 
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+# Dependencies first so this layer is cached until the lockfile changes. --locked
+# fails the build if uv.lock is out of date with pyproject.toml, so the image always
+# gets exactly the versions that were tested.
+COPY pyproject.toml uv.lock .python-version ./
+RUN uv sync --locked --no-dev --no-install-project --no-cache
 
 COPY app ./app
 

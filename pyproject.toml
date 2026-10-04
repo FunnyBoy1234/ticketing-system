@@ -1,0 +1,17 @@
+[project]
+name = "seat-reservation"
+version = "0.1.0"
+description = "Seat reservation API that stays correct under on-sale stampedes"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.142",
+    "uvicorn[standard]>=0.54",
+    "asyncpg>=0.31",
+    "prometheus-client>=0.26",
+    "pyjwt>=2.15",
+]
+
+[tool.uv]
+# An application, not a library: install its dependencies, never build or install it.
+package = false
