@@ -5,10 +5,12 @@
 """Focused regression checks for replay-after-cancel and decline precedence.
 
 Needs direct database access (it holds a seat lock to force the locked path), so it runs
-against a local stack, not a deployment:
+inside the compose network, not against a deployment:
 
     docker compose up -d
-    DATABASE_URL=postgresql://postgres:postgres@localhost:5432/seats uv run scripts/check_edge_cases.py
+    docker compose --profile checks run --rm edge-cases
+
+or against any Postgres you can reach: DATABASE_URL=... BASE_URL=... uv run scripts/check_edge_cases.py
 
 1. Replay after cancel shows status "cancelled" and does not re-book.
 2a. Fast path: over-limit request that also wants a taken seat -> seat_taken.
@@ -36,11 +38,29 @@ def check(name, ok, detail=""):
     print(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f"  ({detail})" if detail else ""))
 
 
+async def wait_until_ready(s, timeout=120.0):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        try:
+            async with s.get(BASE + "/readyz") as r:
+                if r.status == 200:
+                    return True
+        except aiohttp.ClientError:
+            pass
+        if asyncio.get_running_loop().time() > deadline:
+            return False
+        await asyncio.sleep(2)
+
+
 async def main():
     async with aiohttp.ClientSession() as s:
         async def call(method, path, body=None, headers=None):
             async with s.request(method, BASE + path, json=body, headers=headers) as r:
                 return r.status, await r.json(), r.headers
+
+        if not await wait_until_ready(s):
+            print(f"{BASE}/readyz did not return 200 within 120 s")
+            return 2
 
         _, show, _ = await call("POST", "/shows", {"name": "edge-case-checks", "seats": [f"A{i}" for i in range(1, 9)],
                                                   "price_paise": 25000}, ADMIN)

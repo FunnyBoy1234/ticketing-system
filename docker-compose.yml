@@ -1,9 +1,14 @@
 # Local stack that runs the same image we deploy.
 #
 #   docker compose up --build -d                       # Postgres + API on http://localhost:8000
+#   APP_PORT=8080 docker compose up --build -d          # ...if 8000 is taken
 #   ./burst.sh http://localhost:8000                    # stampede from the host
 #   docker compose --profile burst run --rm burst       # ...or from a container
+#   docker compose --profile checks run --rm edge-cases # forced-race checks (needs the DB)
 #   docker compose stop db                              # watch /readyz fail closed, then `start db`
+#
+# Postgres is deliberately not published to the host: nothing outside this network needs
+# it, and a published 5432 would clash with any Postgres already running on the machine.
 
 services:
   db:
@@ -30,7 +35,7 @@ services:
       DB_POOL_MAX: ${DB_POOL_MAX:-20}
       PORT: 8000
     ports:
-      - "8000:8000"
+      - "${APP_PORT:-8000}:8000"
     depends_on:
       db:
         condition: service_healthy
@@ -44,7 +49,25 @@ services:
       - ./scripts:/work/scripts:ro
     environment:
       ADMIN_KEY: ${ADMIN_KEY:-dev-admin-key}
+      PIP_ROOT_USER_ACTION: ignore
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
     command: ["sh", "-c", "pip install -q 'aiohttp>=3.9' && python scripts/burst.py http://app:8000 --report /tmp/burst-report.json"]
+    depends_on:
+      - app
+
+  edge-cases:
+    profiles: ["checks"]
+    image: python:3.12-slim
+    working_dir: /work
+    volumes:
+      - ./scripts:/work/scripts:ro
+    environment:
+      BASE_URL: http://app:8000
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/seats
+      ADMIN_KEY: ${ADMIN_KEY:-dev-admin-key}
+      PIP_ROOT_USER_ACTION: ignore
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    command: ["sh", "-c", "pip install -q 'aiohttp>=3.9' 'asyncpg>=0.31' && python scripts/check_edge_cases.py"]
     depends_on:
       - app
 

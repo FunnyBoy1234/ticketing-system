@@ -27,13 +27,12 @@ import asyncio
 import json
 import os
 import random
-import statistics
 import string
 import sys
 import time
 import uuid
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
