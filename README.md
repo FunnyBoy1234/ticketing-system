@@ -8,7 +8,7 @@ request ids, and a one-command stampede that checks all of it.
 
 **Stack:** Python 3.12 · FastAPI · asyncpg · PostgreSQL 16 · Prometheus client · uv · Docker
 
-**Live URL:** `<TODO: https://your-service.onrender.com>`  ·  **Write-up:** [WRITEUP.md](WRITEUP.md)
+**Live URL:** `<TODO: https://your-service.onrender.com>`  ·  **Admin key for reviewers:** `<TODO: sent with the submission>`  ·  **Write-up:** [WRITEUP.md](WRITEUP.md)
 
 ---
 
@@ -19,6 +19,10 @@ docker compose up --build -d          # Postgres + API on http://localhost:8000
 curl localhost:8000/readyz            # {"status":"ready",...}
 ./burst.sh http://localhost:8000      # ~20k-request stampede + correctness checks
 ```
+
+Port 8000 taken? `APP_PORT=8080 docker compose up --build -d` (Postgres is not published to
+the host, so a local Postgres on 5432 doesn't clash). Admin key for the local stack:
+`dev-admin-key`.
 
 Against the deployment (the admin key is the `ADMIN_KEY` env var of the service):
 
@@ -90,9 +94,11 @@ curl -X POST $BASE/auth/token -H "X-Admin-Key: $ADMIN_KEY" -H 'Content-Type: app
 | **409** | `per_user_limit` | This would take you over `per_user_limit` seats for the show. |
 | **409** | `idempotency_key_reused` | The key was already used on this show with different seats. |
 | **409** + `Idempotent-Replayed: true` | replay of an earlier decline | Same key, same body, after it was declined. Use a new key for a new attempt. |
-| 400 | `idempotency_key_required`, `invalid_json`, … | Malformed request. |
+| 400 | `idempotency_key_required`, `idempotency_key_too_long` (> 128), `invalid_idempotency_key` (control characters), `invalid_json`, … | Malformed request. |
 | 401 / 403 | `unauthorized` / `not_reservation_owner` | Missing/invalid token; cancelling someone else's reservation. |
 | 404 / 422 | `show_not_found` / `unknown_seats`, `duplicate_seats`, `validation_error` | Bad references or input. |
+| 503 + `Retry-After` | `overloaded` | Every database connection stayed busy for `DB_ACQUIRE_TIMEOUT_S` (300 s). Retry with the same idempotency key. |
+| 503 + `Retry-After` | `database_unavailable` | Postgres is unreachable or restarting. Retry with the same idempotency key. |
 
 Behaviour decisions, stated once:
 
@@ -132,12 +138,17 @@ It prints the outcome distribution, latency percentiles, a metrics reconciliatio
 and PASS/FAIL per check, writes `burst-report.json`, and exits non-zero on any failure.
 Every scenario size is a flag: `./burst.sh <url> --help`.
 
-`scripts/check_edge_cases.py` covers two paths a burst can't hit on demand: it holds a seat
-lock from a separate database connection to force a request onto the locked path, then
-checks that `seat_taken` wins over `per_user_limit` there, and that replaying a key after
-its reservation was cancelled reports `status: "cancelled"` without re-booking. It needs
-`DATABASE_URL`, so run it against `docker compose`, not the deployment:
-`DATABASE_URL=postgresql://postgres:postgres@localhost:5432/seats uv run scripts/check_edge_cases.py`.
+Two smaller checks cover what a burst can't:
+
+* `scripts/check_bad_input.py` sends 51 malformed or hostile requests (invalid JSON,
+  floats for money, NUL bytes, lone surrogates, forged and `alg=none` tokens, bad ids…)
+  and requires the right 4xx for each, never a 5xx. Standard library only, works against
+  any URL: `ADMIN_KEY=... python3 scripts/check_bad_input.py <BASE_URL>`.
+* `scripts/check_edge_cases.py` holds a seat lock from its own database connection to force
+  a request onto the locked path, then checks that `seat_taken` wins over `per_user_limit`
+  there, and that replaying a key after a cancel reports `status: "cancelled"` without
+  re-booking. It needs the database, so it runs inside the compose network:
+  `docker compose --profile checks run --rm edge-cases`.
 
 Local run (2 vCPU box shared by Postgres, the API and the client):
 
@@ -177,6 +188,7 @@ ALL CHECKS PASSED
 | `reserve_transaction_retries_total{sqlstate}` | counter | deadlock/serialization retries; expected to stay 0 |
 | `http_requests_total`, `http_request_duration_seconds`, `http_requests_in_flight` | | per route & status |
 | `db_up`, `db_pool_connections{state}` | gauge | pool saturation is visible as `in_use == max` |
+| `db_pool_acquire_timeouts_total` | counter | requests that waited `DB_ACQUIRE_TIMEOUT_S` and got `503 overloaded` |
 
 Counters are incremented after the transaction commits. The seat gauges come from the
 same rows `GET /shows/{id}` reads, so they cannot drift from the API. Counters are per
@@ -206,7 +218,8 @@ after 30 days.
 | `DATABASE_URL` | local Postgres | `postgres://` or `postgresql://` |
 | `ADMIN_KEY`, `JWT_SECRET` | dev values (logged as a warning) | **set in production** |
 | `DB_POOL_MAX` | 20 | keep under the database's connection limit |
-| `DB_ACQUIRE_TIMEOUT_S` | 120 | requests queue for a connection rather than fail |
+| `DB_ACQUIRE_TIMEOUT_S` | 300 | how long a request queues for a connection before `503 overloaded` |
+| `DB_STARTUP_WAIT_S` | 45 | startup waits this long for Postgres before opening the port anyway |
 | `DB_STATEMENT_CACHE_SIZE` | 100 | set `0` behind PgBouncer in transaction mode |
 | `LOGS_ENDPOINT_PUBLIC` | true | false → `/logs` needs the admin key |
 
@@ -224,7 +237,8 @@ app/
   observability.py JSON logs, request ids, Prometheus metrics, ASGI middleware
   auth.py          JWT (HS256) users, admin key
 scripts/burst.py   the stampede + checks
-scripts/check_edge_cases.py  forced-race checks for replay-after-cancel and seat_taken precedence (local, needs DB access)
+scripts/check_bad_input.py   malformed/hostile input against every endpoint: right 4xx, never 5xx (any URL)
+scripts/check_edge_cases.py  forced-race checks for replay-after-cancel and seat_taken precedence (needs the DB)
 burst.sh           one-command wrapper
 pyproject.toml     dependencies (PEP 621); uv.lock pins exact versions; .python-version = 3.12
 ```

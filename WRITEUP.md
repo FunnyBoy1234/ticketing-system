@@ -113,9 +113,18 @@ reservation-id guard makes expiry unable to touch a seat that was confirmed or r
 Consistency. Postgres is the only place a seat decision is made, and the app never
 decides from local state (the only cache holds immutable show metadata: seat list, price,
 limit). If an instance cannot reach the database, it refuses: reserves return
-`503 database_unavailable`, `/readyz` goes red so the platform stops routing to it, and
-`/livez` stays green so it is not restart-looped. Selling nothing for a minute is
+`503 database_unavailable` and `/readyz` goes red. Where a platform has separate probes
+(Docker's `HEALTHCHECK`, Kubernetes), liveness is `/livez`, which never touches the
+database, so an outage does not restart the process. Render has a single health check,
+pointed at `/readyz` so a deploy only goes live once it can reach Postgres; during an
+outage Render stops routing to the instance and may restart it, which is harmless: it
+reconnects on boot and keeps refusing until it can. Selling nothing for a minute is
 recoverable; selling A12 twice is not.
+
+Overload is reported separately from an outage: if every pool connection stays busy for
+`DB_ACQUIRE_TIMEOUT_S` (300 s by default), the request gets `503 overloaded` with
+`Retry-After`, and `db_pool_acquire_timeouts_total` counts it. The database is fine in
+that case; the instance is too small for the load.
 
 The client side of a partition is a timeout with an unknown outcome. The idempotency key
 makes the retry safe: the retry either replays the committed result or performs the
@@ -134,6 +143,7 @@ be sold again.
 | Any 5xx on `/shows/{id}/reserve` over 5 min | Declines are 409s by design; a 5xx is a bug or an outage. |
 | `/readyz` failing or `db_up == 0` for > 1 min | We are refusing all sales. |
 | `db_pool_connections{state="in_use"} == max` with p99 latency over SLO for 10 min during an on-sale | Capacity: requests queue for connections. |
+| `db_pool_acquire_timeouts_total` increasing | Requests waited `DB_ACQUIRE_TIMEOUT_S` and got `503 overloaded`: add capacity now. |
 | `reserve_transaction_retries_total` increasing | Should be 0 by design. Ticket alone, page together with 5xx. |
 
 Not paged: a spike in `seat_taken`. That is the product working.
@@ -170,8 +180,10 @@ What I reviewed, changed or decided myself: **TODO**
 
 1. **Holds with TTL + confirm** (§3), with a sweeper and lazy expiry inside the guarded update.
 2. **Idempotency key retention:** expire after 24h and clean up in batches; the table grows with every request today.
-3. **Throughput:** the API process, not Postgres, is the bottleneck (~0.8 CPU-seconds per
-   second at ~700 req/s locally vs ~0.5 for Postgres). Profile the hot path, then scale out
+3. **Throughput:** the API process, not Postgres, is the first ceiling. Measured over a full
+   20k burst on a 2-core box that also ran the load generator: the API used ~0.73 cores and
+   Postgres ~0.43, about 1 ms of API CPU per request, and one uvicorn worker cannot use more
+   than one core. Profile the hot path, then scale out
    instances (correctness lives in the database, so instances are stateless). For real
    on-sales, add an admission queue in front so the database sees a steady rate.
 4. **Metrics at scale:** drop `show_id` from counter labels (unbounded cardinality), aggregate across instances, ship logs to a real backend instead of the in-process `/logs` buffer.
