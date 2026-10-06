@@ -97,8 +97,7 @@ curl -X POST $BASE/auth/token -H "X-Admin-Key: $ADMIN_KEY" -H 'Content-Type: app
 | 400 | `idempotency_key_required`, `idempotency_key_too_long` (> 128), `invalid_idempotency_key` (control characters), `invalid_json`, … | Malformed request. |
 | 401 / 403 | `unauthorized` / `not_reservation_owner` | Missing/invalid token; cancelling someone else's reservation. |
 | 404 / 422 | `show_not_found` / `unknown_seats`, `duplicate_seats`, `validation_error` | Bad references or input. |
-| 503 + `Retry-After` | `overloaded` | Every database connection stayed busy for `DB_ACQUIRE_TIMEOUT_S` (300 s). Retry with the same idempotency key. |
-| 503 + `Retry-After` | `database_unavailable` | Postgres is unreachable or restarting. Retry with the same idempotency key. |
+| 503 + `Retry-After` | `database_unavailable` / `overloaded` | Postgres is unreachable or restarting / every connection stayed busy for `DB_ACQUIRE_TIMEOUT_S`. Retry with the same idempotency key. The only 5xx the service returns on purpose. |
 
 Behaviour decisions, stated once:
 
@@ -162,9 +161,6 @@ Local run (2 vCPU box shared by Postgres, the API and the client):
   idempotency_key_mismatch        200
   per_user_limit                  124
 
-  metrics reconciliation              /metrics   observed
-  reservations_confirmed_total            ...    ...  ok
-  ...
   [PASS] zero 5xx during burst  (0 responses >= 500)
   [PASS] hot seats: exactly one 201 each, rest 409 (500 users per seat)
   ...
@@ -209,10 +205,6 @@ served by `GET /logs` — e.g. `/logs?request_id=<id>` shows everything one requ
 3. Health check path is `/readyz`, so a deploy only goes live once it can reach Postgres.
 4. Copy `ADMIN_KEY` from the service's Environment tab, then `ADMIN_KEY=... ./burst.sh <url>`.
 
-Free instances sleep after 15 idle minutes (~1 minute to wake) and have a fraction of a
-CPU, so a 20k burst is slow there; `plan: 0.5c-512mb` avoids both. Free Postgres expires
-after 30 days.
-
 | Env var | Default | |
 |---|---|---|
 | `DATABASE_URL` | local Postgres | `postgres://` or `postgresql://` |
@@ -240,5 +232,6 @@ scripts/burst.py   the stampede + checks
 scripts/check_bad_input.py   malformed/hostile input against every endpoint: right 4xx, never 5xx (any URL)
 scripts/check_edge_cases.py  forced-race checks for replay-after-cancel and seat_taken precedence (needs the DB)
 burst.sh           one-command wrapper
+Dockerfile, docker-compose.yml, Makefile, render.yaml   container image, local stack, shortcuts (`make help`), Render blueprint
 pyproject.toml     dependencies (PEP 621); uv.lock pins exact versions; .python-version = 3.12
 ```

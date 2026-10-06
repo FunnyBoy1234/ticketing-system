@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command on-sale stampede against a running deployment.
+# One-command on-sale stampede against a running deployment to test the system.
 #
 #   ./burst.sh https://your-app.onrender.com                # ~20k requests, prints outcome table + checks
 #   ADMIN_KEY=... ./burst.sh <BASE_URL> --requests 5000     # any scripts/burst.py flag works
