@@ -75,8 +75,7 @@ path; nearly all the rest see `confirmed` and leave without touching a lock.
   the waiter proceeds as the new owner.
 * **Replays:** same key + same body → the stored response. A replayed success returns
   **200** with `Idempotent-Replayed: true` and the original body (same `reservation_id`),
-  so "exactly one 201 per seat" stays true even when the winner retries. **TODO: confirm
-  200 vs 201 is the call I want; it is a one-line change in `_replay()`.**
+  so "exactly one 201 per seat" stays true even when the winner retries.
 * **Replay after a cancel:** the key lookup joins the reservation's current status. If it
   was cancelled since, the replay is the same reservation with `status: "cancelled"` and
   `cancelled_at`, not a stale `"confirmed"`. A retry never re-books; a new attempt needs a

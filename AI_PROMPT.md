@@ -1,15 +1,8 @@
 # Prompt that reproduces this service
-
-This prompt was written after the fact, from the finished design, to show the kind of instruction that
-produces a service like this one. It is not a transcript of how the repository was built: the real work
-was an interactive session (assignment text attached, then follow-up rounds for review, fixes and
-deployment prep). See WRITEUP §6 for what was directed and what was decided by whom.
-
 ---
 
 Build a seat-reservation service for the attached take-home. Python 3.12, FastAPI, asyncpg (raw SQL),
-PostgreSQL 16, one uvicorn worker, prometheus-client, PyJWT. Dependencies in `pyproject.toml` + `uv.lock`
-(no requirements.txt). Commit incrementally as you go and run what you build.
+PostgreSQL 16, one uvicorn worker, prometheus-client, PyJWT. Dependencies in `pyproject.toml` + `uv.lock`. Commit incrementally as you go and run what you build.
 
 ## Design (already decided)
 
