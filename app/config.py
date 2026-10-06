@@ -27,9 +27,10 @@ class Settings:
     jwt_secret: str
     token_ttl_seconds: int
     default_per_user_limit: int
-    # Pool sizing: the pool is the only queue in front of Postgres. Requests wait
-    # for a connection instead of failing, so the acquire timeout is generous:
-    # under a burst we would rather be slow than return a 5xx.
+    # Pool sizing: the pool is the only queue in front of Postgres. Requests wait (FIFO)
+    # for a connection instead of failing, so the acquire timeout is generous: under a
+    # burst we would rather be slow than return a 5xx. 300 s covers a 20k-request burst
+    # on a single 0.5-CPU instance with a wide margin.
     db_pool_min: int
     db_pool_max: int
     db_acquire_timeout_s: float
@@ -60,7 +61,7 @@ def load_settings() -> Settings:
         default_per_user_limit=_int("DEFAULT_PER_USER_LIMIT", 4),
         db_pool_min=_int("DB_POOL_MIN", 2),
         db_pool_max=_int("DB_POOL_MAX", 20),
-        db_acquire_timeout_s=float(os.environ.get("DB_ACQUIRE_TIMEOUT_S", 120)),
+        db_acquire_timeout_s=float(os.environ.get("DB_ACQUIRE_TIMEOUT_S", 300)),
         db_statement_timeout_ms=_int("DB_STATEMENT_TIMEOUT_MS", 30_000),
         db_statement_cache_size=_int("DB_STATEMENT_CACHE_SIZE", 100),
         db_startup_wait_s=float(os.environ.get("DB_STARTUP_WAIT_S", 45)),

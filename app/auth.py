@@ -42,7 +42,7 @@ def user_from_token(token: str) -> str:
     except jwt.PyJWTError as exc:
         raise unauthorized(f"invalid token: {exc.__class__.__name__}") from exc
     sub = claims.get("sub")
-    if not isinstance(sub, str) or not USER_ID_RE.match(sub):
+    if not isinstance(sub, str) or not USER_ID_RE.fullmatch(sub):
         raise unauthorized("invalid token subject")
     return sub
 

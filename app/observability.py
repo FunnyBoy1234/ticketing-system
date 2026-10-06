@@ -131,6 +131,10 @@ RESERVATIONS_CANCELLED = Counter(
 SEATS_RELEASED = Counter(
     "reservation_seats_released", "Seats returned to available by cancellation.", ["show_id"]
 )
+DB_POOL_ACQUIRE_TIMEOUTS = Counter(
+    "db_pool_acquire_timeouts",
+    "Requests that waited DB_ACQUIRE_TIMEOUT_S for a pool connection and got 503 overloaded.",
+)
 RESERVE_RETRIES = Counter(
     "reserve_transaction_retries", "Reserve transactions retried after a deadlock/serialization error.", ["sqlstate"]
 )
@@ -209,7 +213,7 @@ class RequestContextMiddleware:
             if name == b"x-request-id":
                 incoming = value.decode("latin-1")
                 break
-        request_id = incoming if _REQUEST_ID_RE.match(incoming) else uuid.uuid4().hex
+        request_id = incoming if _REQUEST_ID_RE.fullmatch(incoming) else uuid.uuid4().hex
         ctx = {"request_id": request_id, "user_id": None, "outcome": None}
         token = _request_ctx.set(ctx)
 

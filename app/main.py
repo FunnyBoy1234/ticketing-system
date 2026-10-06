@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
+import re
 import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints,
 
 from . import auth
 from .config import settings
-from .db import Database, DatabaseUnavailable
+from .db import Database, DatabaseUnavailable, PoolExhausted
 from .errors import ApiError, bad_request, forbidden, not_found, unprocessable
 from .observability import (
     RequestContextMiddleware,
@@ -72,12 +72,24 @@ async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
     return _json(exc.status, {**exc.body(), "request_id": current_request_id()})
 
 
+def _safe_text(value: Any) -> str:
+    """Any value as a string that is guaranteed to encode as UTF-8 (lone surrogates replaced)."""
+    return str(value).encode("utf-8", "replace").decode("utf-8")
+
+
 @app.exception_handler(RequestValidationError)
 async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
-    return _json(422, {"error": "validation_error", "details": exc.errors(), "request_id": current_request_id()})
+    # Only type/loc/msg go back to the client. The raw `input` is never echoed: it can hold
+    # characters (e.g. lone surrogates) that cannot be encoded, which would turn a 422 into a 500.
+    details = [
+        {"type": e.get("type"), "loc": [_safe_text(p) for p in e.get("loc", ())], "msg": _safe_text(e.get("msg", ""))}
+        for e in exc.errors()
+    ]
+    return _json(422, {"error": "validation_error", "details": details, "request_id": current_request_id()})
 
 
 async def _db_unavailable(_: Request, exc: Exception) -> JSONResponse:
+    request_context()["outcome"] = "database_unavailable"
     log.warning("db_unavailable", extra={"error": repr(exc)})
     return _json(
         503,
@@ -86,8 +98,27 @@ async def _db_unavailable(_: Request, exc: Exception) -> JSONResponse:
     )
 
 
+@app.exception_handler(PoolExhausted)
+async def _overloaded(_: Request, exc: PoolExhausted) -> JSONResponse:
+    # The database is fine; every connection stayed busy for DB_ACQUIRE_TIMEOUT_S. Kept apart
+    # from database_unavailable so logs, metrics and alerts say what actually happened.
+    request_context()["outcome"] = "overloaded"
+    log.warning("db_pool_exhausted", extra={"waited_s": settings.db_acquire_timeout_s})
+    return _json(
+        503,
+        {"error": "overloaded", "message": "too many requests in flight; retry with the same idempotency key",
+         "request_id": current_request_id()},
+        headers={"Retry-After": "5"},
+    )
+
+
+# Connection loss, refused/DNS failures (OSError), server shutdown/restart and statement
+# timeouts (OperatorInterventionError) all mean "storage can't serve this right now". So
+# does InternalClientError: it is what asyncpg raises when a pooled connection was killed
+# by a Postgres restart just before the request used it (seen in restart tests).
 for _exc in (DatabaseUnavailable, asyncpg.PostgresConnectionError, asyncpg.TooManyConnectionsError,
-             ConnectionError, TimeoutError, asyncpg.InterfaceError):
+             asyncpg.exceptions.OperatorInterventionError, asyncpg.exceptions.InternalClientError,
+             OSError, TimeoutError, asyncpg.InterfaceError):
     app.add_exception_handler(_exc, _db_unavailable)
 
 
@@ -96,11 +127,15 @@ for _exc in (DatabaseUnavailable, asyncpg.PostgresConnectionError, asyncpg.TooMa
 # --------------------------------------------------------------------------------------
 
 SeatLabel = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{1,16}$")]
+# Free text that ends up in Postgres: no control characters (Postgres text cannot hold NUL).
+# Strings that are not valid Unicode (lone surrogates) are rejected by pydantic itself.
+ShowName = Annotated[str, StringConstraints(pattern=r"^[^\x00-\x1F\x7F]{1,200}$")]
+_KEY_FORBIDDEN = re.compile(r"[\x00-\x1F\x7F]")
 
 
 class CreateShowIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    name: str = Field(min_length=1, max_length=200)
+    name: ShowName
     seats: list[SeatLabel] = Field(min_length=1, max_length=50_000)
     price_paise: StrictInt = Field(ge=0, le=10**12)
     per_user_limit: StrictInt | None = Field(default=None, ge=1, le=1000)
@@ -110,7 +145,7 @@ class ReserveIn(BaseModel):
     # Unknown fields (e.g. a spoofed "user_id") are ignored: identity comes only from the token.
     model_config = ConfigDict(extra="ignore")
     seats: list[SeatLabel] = Field(min_length=1, max_length=50)
-    idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
+    idempotency_key: str | None = None  # validated in post_reserve, same rules as the header
 
 
 class TokenIn(BaseModel):
@@ -170,9 +205,10 @@ async def issue_token(request: Request) -> JSONResponse:
     ids = ([body.user_id] if body.user_id else []) + (body.user_ids or [])
     if not ids:
         raise unprocessable("user_id_required", "provide user_id or user_ids")
-    bad = [u for u in ids if not auth.USER_ID_RE.match(u)]
+    bad = [u for u in ids if not auth.USER_ID_RE.fullmatch(u)]
     if bad:
-        raise unprocessable("invalid_user_id", "user ids must match [A-Za-z0-9_.@:-]{1,64}", invalid=bad[:10])
+        raise unprocessable("invalid_user_id", "user ids must match [A-Za-z0-9_.@:-]{1,64}",
+                            invalid=[_safe_text(u)[:64] for u in bad[:10]])
     tokens = {u: auth.mint_token(u) for u in ids}
     if body.user_id and not body.user_ids:
         return _json(200, {"user_id": body.user_id, "access_token": tokens[body.user_id], "token_type": "bearer",
@@ -228,6 +264,12 @@ async def post_reserve(show_id: str, request: Request) -> JSONResponse:
         raise bad_request("idempotency_key_required", "send an Idempotency-Key header or idempotency_key in the body")
     if len(key) > 128:
         raise bad_request("idempotency_key_too_long", "idempotency keys are at most 128 characters")
+    if _KEY_FORBIDDEN.search(key):
+        raise bad_request("invalid_idempotency_key", "idempotency keys must not contain control characters")
+    try:
+        key.encode("utf-8")
+    except UnicodeEncodeError:
+        raise bad_request("invalid_idempotency_key", "idempotency keys must be valid Unicode text") from None
 
     if len(set(body.seats)) != len(body.seats):
         raise unprocessable("duplicate_seats", "each seat may appear only once in a request")
