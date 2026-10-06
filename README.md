@@ -8,7 +8,7 @@ request ids, and a one-command stampede that checks all of it.
 
 **Stack:** Python 3.12 · FastAPI · asyncpg · PostgreSQL 16 · Prometheus client · uv · Docker
 
-**Live URL:** `<TODO: https://your-service.onrender.com>`  ·  **Admin key for reviewers:** `<TODO: sent with the submission>`  ·  **Write-up:** [WRITEUP.md](WRITEUP.md)
+**Live URL:** https://seat-reservation-zys6.onrender.com ([API docs](https://seat-reservation-zys6.onrender.com/docs), [metrics](https://seat-reservation-zys6.onrender.com/metrics), [logs](https://seat-reservation-zys6.onrender.com/logs))  ·  **Admin key for reviewers:** sent with the submission email  ·  **Write-up:** [WRITEUP.md](WRITEUP.md)
 
 ---
 
