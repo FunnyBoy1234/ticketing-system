@@ -23,8 +23,10 @@ class ShowMeta:
 
 
 class ShowCache:
-    """Show metadata never changes after creation (seat list, price, limit), so it is
-    safe to cache per process and lets us validate seat labels without a DB round trip."""
+    """
+        Show metadata never changes after creation (seat list, price, limit), so it is
+        safe to cache per process and lets us validate seat labels without a DB round trip.
+    """
 
     def __init__(self, capacity: int = 512) -> None:
         self._items: OrderedDict[uuid.UUID, ShowMeta] = OrderedDict()
@@ -95,9 +97,11 @@ async def create_show(
     }
 
 
-# All reads for the show view run in ONE read-only REPEATABLE READ transaction, i.e. one
-# snapshot. Mid-burst the counts, the per-seat list and the cross-checks all describe the
-# same instant, so the invariant can be checked "during" the burst, not only after it.
+"""
+    All reads for the show view run in ONE read-only REPEATABLE READ transaction, i.e. one
+    snapshot. Mid-burst the counts, the per-seat list and the cross-checks all describe the
+    same instant, so the invariant can be checked "during" the burst, not only after it.
+"""
 async def get_show_state(db: Database, show_id: uuid.UUID, *, include_owners: bool) -> dict:
     async with db.acquire() as conn:
         async with conn.transaction(isolation="repeatable_read", readonly=True):

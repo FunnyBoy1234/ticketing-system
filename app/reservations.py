@@ -61,9 +61,9 @@ _MAX_ATTEMPTS = 4
 
 @dataclass
 class Outcome:
-    status: int                       # HTTP status to return
+    status: int
     body: dict[str, Any]
-    reason: str                       # confirmed | seat_taken | per_user_limit | idempotent_replay | idempotency_key_mismatch
+    reason: str
     replayed: bool = False
     headers: dict[str, str] = field(default_factory=dict)
 
@@ -78,7 +78,6 @@ class _Decline(Exception):
 
 
 def request_hash(show_id: uuid.UUID, seats: list[str]) -> str:
-    # Seats are a set: ["A13","A12"] is the same request as ["A12","A13"].
     canonical = json.dumps({"show_id": str(show_id), "seats": sorted(seats)}, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
 
@@ -101,10 +100,6 @@ def _limit_body(show: ShowMeta, requested: int) -> dict[str, Any]:
         "requested": requested,
     }
 
-
-# --------------------------------------------------------------------------------------
-# Reserve
-# --------------------------------------------------------------------------------------
 
 
 async def reserve(db: Database, show: ShowMeta, user_id: str, seats: list[str], key: str) -> Outcome:
@@ -131,12 +126,12 @@ async def reserve(db: Database, show: ShowMeta, user_id: str, seats: list[str], 
 async def _reserve_once(
     conn: asyncpg.Connection, show: ShowMeta, user_id: str, seats: list[str], key: str, req_hash: str
 ) -> Outcome:
-    # 1) Retry of a request we already decided? Cheap read, no locks. Most retries end here.
+    # Step 1: Retry of a request we already decided? Cheap read, no locks. Most retries end here.
     existing = await _load_key(conn, show.id, user_id, key)
     if existing is not None:
         return _replay(existing, req_hash)
 
-    # 2) Fast decline for hot seats: a plain read of committed state. If any seat is already
+    # Step 2: Fast decline for hot seats: a plain read of committed state. If any seat is already
     #    taken we decline right away instead of queueing on its row lock. This is safe because
     #    it can only produce a *decline*, and the seat really was taken at the moment we read
     #    it. A *confirm* never comes from this read - it has to win the locked path below.
@@ -150,13 +145,13 @@ async def _reserve_once(
             conn, show, user_id, key, req_hash, "seat_taken", _seat_taken_body(show.id, [r["label"] for r in taken])
         )
 
-    # 3) Over the limit in a single request: decline without touching any locks.
+    # Step 3: Over the limit in a single request: decline without touching any locks.
     if len(seats) > show.per_user_limit:
         return await _record_decline(conn, show, user_id, key, req_hash, "per_user_limit", _limit_body(show, len(seats)))
 
-    # 4) Authoritative path: one transaction.
+    # Step 4: Authoritative path: one transaction.
     async with conn.transaction():
-        # 4a) Claim the idempotency key. If another request holds it uncommitted, this
+        # Step 4a: Claim the idempotency key. If another request holds it uncommitted, this
         #     INSERT waits for that transaction; if it committed we get no row back.
         claimed = await conn.fetchval(
             """
@@ -178,7 +173,7 @@ async def _reserve_once(
         except _Decline as decline:
             status, body, reason = 409, decline.body, decline.reason
 
-        # 4b) Record the decision under the key, in the same transaction as its effects.
+        # Step 4b: Record the decision under the key, in the same transaction as its effects.
         await conn.execute(
             """
             UPDATE idempotency_keys
@@ -194,9 +189,12 @@ async def _reserve_once(
 async def _take_seats(conn: asyncpg.Connection, show: ShowMeta, user_id: str, seats: list[str]) -> dict[str, Any]:
     n = len(seats)
 
-    # Lock the requested seats in a deterministic order (by label) - no deadlocks. Seats come
-    # before the quota row, so a request that is over the limit AND wants a taken seat is
-    # declined as seat_taken here, matching the fast path.
+    """
+        Lock the requested seats in a deterministic order (by label) - no deadlocks. Seats come
+        before the quota row, so a request that is over the limit AND wants a taken seat is
+        declined as seat_taken here, matching the fast path.
+    """
+
     locked = await conn.fetch(
         "SELECT label, status FROM seats WHERE show_id = $1 AND label = ANY($2::text[]) ORDER BY label FOR UPDATE",
         show.id, seats,
@@ -207,9 +205,12 @@ async def _take_seats(conn: asyncpg.Connection, show: ShowMeta, user_id: str, se
     if len(locked) != n:  # validated against the show's seat list already; defensive only
         raise RuntimeError(f"seat rows missing for show {show.id}: wanted {n}, found {len(locked)}")
 
-    # Per-user limit: check-and-increment in ONE statement. The row lock it takes also
-    # serialises this user's concurrent requests for this show, so 10 parallel requests
-    # on a limit of 4 cannot all see "0 held" and all succeed.
+    """
+        Per-user limit: check-and-increment in ONE statement. The row lock it takes also
+        serialises this user's concurrent requests for this show, so 10 parallel requests
+        on a limit of 4 cannot all see "0 held" and all succeed.
+    """
+
     held_after = await conn.fetchval(
         """
         INSERT INTO user_show_quota (show_id, user_id, seats_held)
@@ -257,7 +258,10 @@ async def _take_seats(conn: asyncpg.Connection, show: ShowMeta, user_id: str, se
 
 
 async def _load_key(conn: asyncpg.Connection, show_id: uuid.UUID, user_id: str, key: str) -> asyncpg.Record | None:
-    # The join brings the reservation's *current* status, so a replay after a cancel can say so.
+    """
+        The join brings the reservation's *current* status, so a replay after a cancel can say so.
+    """
+
     return await conn.fetchrow(
         """
         SELECT k.request_hash, k.status_code, k.response,
@@ -279,8 +283,11 @@ async def _record_decline(
     reason: str,
     body: dict[str, Any],
 ) -> Outcome:
-    """Store a decline under the key (single autocommit INSERT). If someone else already
-    claimed the key, their decision wins and we replay it instead."""
+    """
+        Store a decline under the key (single autocommit INSERT). If someone else already
+        claimed the key, their decision wins and we replay it instead.
+    """
+
     inserted = await conn.fetchval(
         """
         INSERT INTO idempotency_keys (user_id, key, request_hash, show_id, status_code, response)

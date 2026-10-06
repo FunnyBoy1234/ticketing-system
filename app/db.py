@@ -1,13 +1,13 @@
-"""Postgres access: connection pool, startup with retry, schema migration, health probe."""
+"""Database Module"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import random
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
 
 import asyncpg
 
@@ -21,22 +21,21 @@ _MIGRATION_LOCK_ID = 7_421_001  # arbitrary, app-wide advisory lock id
 
 
 class DatabaseUnavailable(Exception):
-    """Raised when a request needs the database and it is not reachable."""
+    """
+        Raised when a request needs the database and it is not reachable.
+    """
 
 
 class PoolExhausted(Exception):
-    """Raised when a request waited DB_ACQUIRE_TIMEOUT_S for a pool connection. The database
-    is up; every connection stayed busy. Rendered as 503 `overloaded`, not `database_unavailable`."""
+    """
+        Raised when a request waited DB_ACQUIRE_TIMEOUT_S for a pool connection. The database
+        is up; every connection stayed busy. Rendered as 503 `overloaded`, not `database_unavailable`.
+    """
 
 
 class SideConnection:
-    """A single dedicated connection outside the pool, reconnected on demand.
-
-    Readiness probes and metrics scrapes use these, never a pool slot. Under a burst
-    the pool is saturated by design (requests queue for it). A probe queued behind
-    them would report "not ready" and could get a healthy instance restarted
-    mid-burst; a metrics scrape queued behind them would go blind exactly when we
-    most want to watch.
+    """
+        Single extra connection for metrics and healthcheck
     """
 
     def __init__(self, dsn: str, name: str) -> None:
@@ -76,18 +75,9 @@ class Database:
         self._probe = SideConnection(settings.database_url, "probe")
         self.observer = SideConnection(settings.database_url, "observer")
 
-    # ---- lifecycle -------------------------------------------------------------
-
     async def start(self) -> None:
-        """Begin connecting in the background and wait (bounded) for the first success.
-
-        This runs during uvicorn's startup, which finishes BEFORE the server opens its port.
-        So while we wait, nothing - not even /livez - answers, and no platform can route
-        traffic to an instance that can't reach the database yet (on a cold start the first
-        requests are held by the platform instead of getting 503s). If the database is still
-        unreachable after DB_STARTUP_WAIT_S, we start anyway: /livez answers, /readyz reports
-        not ready, and the background loop keeps retrying until the pool exists and the
-        schema is applied.
+        """
+            Begin connecting in the background and wait for the first success.
         """
         self._connect_task = asyncio.create_task(self._connect_loop(), name="db-connect")
         try:
@@ -118,7 +108,6 @@ class Database:
                     server_settings={
                         "application_name": "seat-reservation",
                         "statement_timeout": str(self._settings.db_statement_timeout_ms),
-                        # Never leave a transaction open if the app stalls mid-request.
                         "idle_in_transaction_session_timeout": "60000",
                         "jit": "off",
                     },
@@ -130,7 +119,7 @@ class Database:
                 return
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 - any failure means "retry later"
+            except Exception as exc:
                 log.warning("db_connect_failed", extra={"attempt": attempt, "error": repr(exc)})
                 await asyncio.sleep(delay + random.uniform(0, delay / 2))
                 delay = min(delay * 2, 10.0)
@@ -144,8 +133,6 @@ class Database:
             finally:
                 await conn.execute("SELECT pg_advisory_unlock($1)", _MIGRATION_LOCK_ID)
 
-    # ---- access ----------------------------------------------------------------
-
     @property
     def pool(self) -> asyncpg.Pool:
         if self._pool is None:
@@ -153,11 +140,12 @@ class Database:
         return self._pool
 
     @asynccontextmanager
-    async def acquire(self) -> AsyncIterator[asyncpg.Connection]:
-        """A pool connection. Waits (FIFO) up to DB_ACQUIRE_TIMEOUT_S, then PoolExhausted.
+    async def acquire(self) -> AsyncGenerator[asyncpg.Connection]:
+        """
+            A pool connection. Waits (FIFO) up to DB_ACQUIRE_TIMEOUT_S, then PoolExhausted.
 
-        Only the wait for a connection is turned into PoolExhausted; a timeout while a query
-        runs (command_timeout) is a different failure and surfaces as database_unavailable.
+            Only the wait for a connection is turned into PoolExhausted; a timeout while a query
+            runs (command_timeout) is a different failure and surfaces as database_unavailable.
         """
         pool = self.pool
         try:
@@ -169,12 +157,8 @@ class Database:
             yield conn
         finally:
             try:
-                await pool.release(conn)  # rolls back anything left open and returns it to the pool
-            except Exception as exc:  # noqa: BLE001
-                # A connection broken mid-request (e.g. Postgres restarting) can fail its reset
-                # here. asyncpg has already terminated it, so the pool will not reuse it. Raising
-                # would replace the request's own outcome - a committed success, or the
-                # connection error that maps to 503 - with an unmapped error, i.e. a 500.
+                await pool.release(conn)
+            except Exception as exc:
                 log.warning("db_release_failed", extra={"error": repr(exc)})
 
     def pool_stats(self) -> dict[str, int]:
@@ -187,11 +171,13 @@ class Database:
         }
 
     async def probe(self, timeout: float = 2.0) -> tuple[bool, str]:
-        """Readiness check: is the database reachable *right now*? Fails closed."""
+        """
+            Readiness check: is the database reachable at that time
+        """
         if self._pool is None:
             return False, "pool not initialised (database unreachable or schema not applied yet)"
         try:
             await self._probe.run(lambda conn: conn.fetchval("SELECT 1"), timeout=timeout)
             return True, "ok"
-        except Exception as exc:  # noqa: BLE001 - any failure means "not ready"
+        except Exception as exc:
             return False, repr(exc)

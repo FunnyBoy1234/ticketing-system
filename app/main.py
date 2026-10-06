@@ -1,4 +1,4 @@
-"""HTTP API: wiring, validation, auth, and health/metrics/log endpoints."""
+"""All relevant APIs"""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import uuid
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
@@ -38,7 +39,7 @@ db = Database(settings)
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
     if settings.using_dev_secrets:
         log.warning("using_dev_secrets", extra={"hint": "set ADMIN_KEY and JWT_SECRET in production"})
     await db.start()
@@ -56,12 +57,6 @@ app = FastAPI(
 )
 app.add_middleware(RequestContextMiddleware)
 
-
-# --------------------------------------------------------------------------------------
-# Error rendering: every non-2xx is JSON with a stable `error` code and the request id.
-# --------------------------------------------------------------------------------------
-
-
 def _json(status: int, body: dict[str, Any], headers: dict[str, str] | None = None) -> JSONResponse:
     return JSONResponse(status_code=status, content=body, headers=headers)
 
@@ -73,14 +68,14 @@ async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
 
 
 def _safe_text(value: Any) -> str:
-    """Any value as a string that is guaranteed to encode as UTF-8 (lone surrogates replaced)."""
+    """
+        Any value as a string that is guaranteed to encode as UTF-8 (lone surrogates replaced).
+    """
     return str(value).encode("utf-8", "replace").decode("utf-8")
 
 
 @app.exception_handler(RequestValidationError)
 async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
-    # Only type/loc/msg go back to the client. The raw `input` is never echoed: it can hold
-    # characters (e.g. lone surrogates) that cannot be encoded, which would turn a 422 into a 500.
     details = [
         {"type": e.get("type"), "loc": [_safe_text(p) for p in e.get("loc", ())], "msg": _safe_text(e.get("msg", ""))}
         for e in exc.errors()
@@ -100,8 +95,11 @@ async def _db_unavailable(_: Request, exc: Exception) -> JSONResponse:
 
 @app.exception_handler(PoolExhausted)
 async def _overloaded(_: Request, exc: PoolExhausted) -> JSONResponse:
-    # The database is fine; every connection stayed busy for DB_ACQUIRE_TIMEOUT_S. Kept apart
-    # from database_unavailable so logs, metrics and alerts say what actually happened.
+    """
+        The database is fine; every connection stayed busy for DB_ACQUIRE_TIMEOUT_S. Kept apart
+        from database_unavailable so logs, metrics and alerts say what actually happened.
+    """
+    
     request_context()["outcome"] = "overloaded"
     log.warning("db_pool_exhausted", extra={"waited_s": settings.db_acquire_timeout_s})
     return _json(
@@ -112,23 +110,18 @@ async def _overloaded(_: Request, exc: PoolExhausted) -> JSONResponse:
     )
 
 
-# Connection loss, refused/DNS failures (OSError), server shutdown/restart and statement
-# timeouts (OperatorInterventionError) all mean "storage can't serve this right now". So
-# does InternalClientError: it is what asyncpg raises when a pooled connection was killed
-# by a Postgres restart just before the request used it (seen in restart tests).
+
 for _exc in (DatabaseUnavailable, asyncpg.PostgresConnectionError, asyncpg.TooManyConnectionsError,
              asyncpg.exceptions.OperatorInterventionError, asyncpg.exceptions.InternalClientError,
              OSError, TimeoutError, asyncpg.InterfaceError):
     app.add_exception_handler(_exc, _db_unavailable)
 
 
-# --------------------------------------------------------------------------------------
-# Request models. Money is StrictInt paise: 25000.0 or "25000" is rejected, not coerced.
-# --------------------------------------------------------------------------------------
-
 SeatLabel = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{1,16}$")]
-# Free text that ends up in Postgres: no control characters (Postgres text cannot hold NUL).
-# Strings that are not valid Unicode (lone surrogates) are rejected by pydantic itself.
+"""
+    Free text that ends up in Postgres: no control characters (Postgres text cannot hold NUL).
+    Strings that are not valid Unicode (lone surrogates) are rejected by pydantic itself.
+"""
 ShowName = Annotated[str, StringConstraints(pattern=r"^[^\x00-\x1F\x7F]{1,200}$")]
 _KEY_FORBIDDEN = re.compile(r"[\x00-\x1F\x7F]")
 
@@ -142,10 +135,9 @@ class CreateShowIn(BaseModel):
 
 
 class ReserveIn(BaseModel):
-    # Unknown fields (e.g. a spoofed "user_id") are ignored: identity comes only from the token.
     model_config = ConfigDict(extra="ignore")
     seats: list[SeatLabel] = Field(min_length=1, max_length=50)
-    idempotency_key: str | None = None  # validated in post_reserve, same rules as the header
+    idempotency_key: str | None = None
 
 
 class TokenIn(BaseModel):
@@ -174,10 +166,6 @@ def _parse_uuid(raw: str, code: str, what: str) -> uuid.UUID:
     except ValueError as exc:
         raise not_found(code, f"{what} {raw} does not exist") from exc
 
-
-# --------------------------------------------------------------------------------------
-# Routes
-# --------------------------------------------------------------------------------------
 
 
 @app.get("/")
@@ -248,7 +236,7 @@ async def get_show(show_id: str, request: Request) -> JSONResponse:
 
 @app.post("/shows/{show_id}/reserve")
 async def post_reserve(show_id: str, request: Request) -> JSONResponse:
-    user_id = auth.require_user(request)  # identity: token only
+    user_id = auth.require_user(request)
     sid = _parse_uuid(show_id, "show_not_found", "show")
     raw = await _json_body(request)
     body: ReserveIn = _validate(ReserveIn, raw)
@@ -304,24 +292,25 @@ async def get_reservation_route(reservation_id: str, request: Request) -> JSONRe
     return _json(200, reservation_view(row))
 
 
-# ---- health -------------------------------------------------------------------------
-
 
 @app.get("/livez")
 async def livez() -> dict[str, str]:
-    """Liveness: the process is up and serving. Deliberately no dependency checks."""
+    """
+        Health Check.
+    """
     return {"status": "ok"}
 
 
 @app.get("/readyz")
 async def readyz() -> JSONResponse:
-    """Readiness: can we serve traffic right now? Checks Postgres; fails closed (503)."""
+    """
+        DB Health Check.
+    """
     ok, detail = await db.probe()
     body = {"status": "ready" if ok else "not_ready", "checks": {"database": detail}, "pool": db.pool_stats()}
     return _json(200 if ok else 503, body)
 
 
-# ---- metrics & logs -----------------------------------------------------------------
 
 
 @app.get("/metrics")
@@ -341,7 +330,9 @@ async def metrics() -> Response:
 
 @app.get("/logs")
 async def logs(request: Request, limit: int = 200, request_id: str | None = None, event: str | None = None) -> JSONResponse:
-    """Tail of this instance's structured logs (newest last). Filter by request_id or event."""
+    """
+        Tail of this instance's structured logs (newest last). Filter by request_id or event.
+    """
     if not settings.logs_endpoint_public:
         auth.require_admin(request)
     limit = max(1, min(limit, 2000))

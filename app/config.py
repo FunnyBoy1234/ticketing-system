@@ -1,4 +1,4 @@
-"""Runtime configuration, read once from the environment."""
+"""Runtime configuration."""
 
 from __future__ import annotations
 
@@ -27,15 +27,10 @@ class Settings:
     jwt_secret: str
     token_ttl_seconds: int
     default_per_user_limit: int
-    # Pool sizing: the pool is the only queue in front of Postgres. Requests wait (FIFO)
-    # for a connection instead of failing, so the acquire timeout is generous: under a
-    # burst we would rather be slow than return a 5xx. 300 s covers a 20k-request burst
-    # on a single 0.5-CPU instance with a wide margin.
     db_pool_min: int
     db_pool_max: int
     db_acquire_timeout_s: float
     db_statement_timeout_ms: int
-    # Set to 0 when running behind PgBouncer in transaction mode (Neon/Supabase poolers).
     db_statement_cache_size: int
     db_startup_wait_s: float
     log_level: str
@@ -50,7 +45,6 @@ class Settings:
 
 def load_settings() -> Settings:
     db_url = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/seats")
-    # Some platforms hand out postgres:// URLs; asyncpg accepts both, normalise anyway.
     if db_url.startswith("postgres://"):
         db_url = "postgresql://" + db_url[len("postgres://"):]
     return Settings(

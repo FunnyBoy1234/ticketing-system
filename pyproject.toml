@@ -13,5 +13,4 @@ dependencies = [
 ]
 
 [tool.uv]
-# An application, not a library: install its dependencies, never build or install it.
 package = false

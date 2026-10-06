@@ -1,6 +1,3 @@
--- Schema is applied on startup (idempotent) under an advisory lock, so several
--- instances booting at once do not race each other.
-
 CREATE TABLE IF NOT EXISTS shows (
     id              uuid        PRIMARY KEY,
     name            text        NOT NULL,
@@ -18,7 +15,7 @@ CREATE INDEX IF NOT EXISTS shows_created_at_idx ON shows (created_at DESC);
 CREATE TABLE IF NOT EXISTS seats (
     show_id         uuid        NOT NULL REFERENCES shows (id),
     label           text        NOT NULL,
-    position        int         NOT NULL,           -- creation order, for display
+    position        int         NOT NULL,
     status          text        NOT NULL DEFAULT 'available'
                                 CHECK (status IN ('available', 'held', 'confirmed')),
     reservation_id  uuid,

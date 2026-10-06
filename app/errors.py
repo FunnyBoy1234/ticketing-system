@@ -1,4 +1,4 @@
-"""Error types that map to clean JSON responses."""
+"""Error type maps."""
 
 from __future__ import annotations
 
@@ -6,7 +6,9 @@ from typing import Any
 
 
 class ApiError(Exception):
-    """An expected, client-facing outcome rendered as {"error": code, "message": ...}."""
+    """
+        An expected, client-facing outcome rendered as {"error": code, "message": ...}.
+    """
 
     def __init__(self, status: int, code: str, message: str, **extra: Any) -> None:
         super().__init__(message)

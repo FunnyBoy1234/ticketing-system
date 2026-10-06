@@ -1,4 +1,4 @@
-"""Authentication.
+"""Authentication Module.
 
 Users: HS256 JWT in `Authorization: Bearer <token>`. The user id is the `sub` claim
 and nothing else - request bodies never carry identity.
@@ -35,7 +35,7 @@ def user_from_token(token: str) -> str:
         claims = jwt.decode(
             token,
             settings.jwt_secret,
-            algorithms=["HS256"],  # pinned: never let the token pick its algorithm
+            algorithms=["HS256"],
             issuer=_ISSUER,
             options={"require": ["sub", "exp", "iss"]},
         )
@@ -63,5 +63,5 @@ def require_user(request: Request) -> str:
     if scheme.lower() != "bearer" or not token:
         raise unauthorized()
     user_id = user_from_token(token.strip())
-    request_context()["user_id"] = user_id  # stamped on every log line from here on
+    request_context()["user_id"] = user_id
     return user_id

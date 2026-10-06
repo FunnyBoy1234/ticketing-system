@@ -18,10 +18,9 @@ from prometheus_client.core import GaugeMetricFamily
 from prometheus_client.registry import REGISTRY, Collector
 from starlette.datastructures import MutableHeaders
 
-# --------------------------------------------------------------------------------------
-# Request context: one mutable dict per request, visible to every log line it produces.
-# --------------------------------------------------------------------------------------
-
+""" 
+    Request context: one mutable dict per request, visible to every log line it produces.
+"""
 _request_ctx: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("request_ctx", default=None)
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
@@ -37,10 +36,11 @@ def current_request_id() -> str | None:
     return ctx["request_id"] if ctx else None
 
 
-# --------------------------------------------------------------------------------------
-# Logging: one JSON object per line on stdout, plus an in-memory ring buffer that backs
-# GET /logs so reviewers can read live logs without an account on the hosting platform.
-# --------------------------------------------------------------------------------------
+"""
+    Logging: one JSON object per line on stdout, plus an in-memory ring buffer that backs
+    GET /logs so reviewers can read live logs without an account on the hosting platform.
+
+"""
 
 _STD_ATTRS = set(vars(logging.LogRecord("", 0, "", 0, "", None, None))) | {"message", "asctime", "taskName", "color_message"}
 
@@ -107,11 +107,11 @@ def setup_logging(level: str, buffer_size: int) -> None:
         logging.getLogger(name).propagate = True
 
 
-# --------------------------------------------------------------------------------------
-# Metrics. Counters are bumped after the transaction commits, so they count decisions
-# that actually happened. Seat gauges are read from Postgres at scrape time, so they
-# always agree with GET /shows/{id} (both come from the same rows).
-# --------------------------------------------------------------------------------------
+""" 
+    Metrics. Counters are bumped after the transaction commits, so they count decisions
+    that actually happened. Seat gauges are read from Postgres at scrape time, so they
+    always agree with GET /shows/{id} (both come from the same rows).
+"""
 
 RESERVATIONS_CONFIRMED = Counter(
     "reservations_confirmed", "Reservations confirmed (HTTP 201).", ["show_id"]
@@ -149,7 +149,9 @@ IN_FLIGHT = Gauge("http_requests_in_flight", "HTTP requests currently being serv
 
 
 class SeatStateCollector(Collector):
-    """Exposes per-show seat counts from the last DB snapshot taken by /metrics."""
+    """
+        Exposes per-show seat counts from the last DB snapshot taken by /metrics.
+    """
 
     def __init__(self) -> None:
         self.snapshot: list[dict[str, Any]] = []
@@ -191,9 +193,6 @@ seat_collector = SeatStateCollector()
 REGISTRY.register(seat_collector)
 
 
-# --------------------------------------------------------------------------------------
-# ASGI middleware: request id, access log, HTTP metrics, last-resort 500 handler.
-# --------------------------------------------------------------------------------------
 
 _access_log = logging.getLogger("app.access")
 _QUIET_ROUTES = {"/metrics", "/livez", "/readyz", "/logs"}
